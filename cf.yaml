@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create an S3 Bucket
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: raylayadi-test-bucket-asdf
+  Vpc:
+    Type: String
+    Default: vpc-0f988868
+  Subnet1:
+    Type: String
+    Default: subnet-11708877
+  Subnet2:
+    Type: String
+    Default: subnet-0c3b5154
+
+Resources:
+  # Bucket
+  MyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  # Batch job
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'batch.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole'
+  
+  JobSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: 'Security Group for Batch job'
+
+  ComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      State: ENABLED
+      ServiceRole: !GetAtt ServiceRole.Arn
+      ComputeResources:
+        Type: FARGATE
+        MaxvCpus: 1
+        Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+        SecurityGroupIds:
+        - !Ref JobSG
+  
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      ComputeEnvironmentOrder:
+        - ComputeEnvironment: !Ref ComputeEnvironment
+          Order: 1
+      Priority: 1
+      State: ENABLED
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+     AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ecs-tasks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+     ManagedPolicyArns:
+     - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+  JobRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ecs-tasks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+      - PolicyName: BucketAccess
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action: [ 's3:GetObject', 's3:PutObject' ]
+              Resource:
+              - !Join ['', ['arn:aws:s3:::', { Ref: BucketName }, '/*' ] ]
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join [ '', [ '/', { Ref: 'AWS::StackName' }, '/log' ] ]
+      RetentionInDays: 14
+
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      JobDefinitionName: { Ref: "AWS::StackName" }
+      PlatformCapabilities:
+      - FARGATE
+      # Tags:
+      #   aws:dlm:event-type:batch-job: true
+      Timeout:
+        AttemptDurationSeconds: 60
+      RetryStrategy:
+        Attempts: 1
+      ContainerProperties:
+        Command:
+        - echo
+        - hello
+        - world
+        Image: 'debian:latest'
+        NetworkConfiguration:
+          AssignPublicIp: ENABLED
+        ResourceRequirements:
+        - Type: VCPU
+          Value: 0.5
+        - Type: MEMORY
+          Value: 1024
+        JobRoleArn: !GetAtt JobRole.Arn
+        ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            "awslogs-group": !Ref LogGroup
+            "awslogs-stream-prefix": "prefix"
+
+  RootBatchRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - batch.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  MyEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      # Tags:
+      #   aws:dlm:event-type:batch-job: true
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+            - !Ref MyBucket
+          # object:
+          #   key:
+          #   - suffix: ".mp4"
+      Targets:
+        - Arn: 
+            Ref: JobQueue
+          Id: mybatchtarget
+          RoleArn: !GetAtt RootBatchRole.Arn
+          BatchParameters:
+            JobDefinition: 
+              Ref: JobDefinition
+            JobName: myjob
+          # Input:
+          #   !Sub
+          #     - '{"Parameters": {"param1": "--param.name1=${param1}", "param2": "--param.name2=${param2}"}}'
+          #     - param1: {param1_value}
+          #       param2: {param2_value}
