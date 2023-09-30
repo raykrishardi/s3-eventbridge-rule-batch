@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Create an S3 Bucket
+Description: s3 event rule with batch job queue target
 
 Parameters:
   BucketName:
@@ -16,7 +16,9 @@ Parameters:
     Default: subnet-0c3b5154
 
 Resources:
+  ###
   # Bucket
+  ###
   MyBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -25,12 +27,14 @@ Resources:
         EventBridgeConfiguration:
           EventBridgeEnabled: true
 
-  # Batch job
-  ServiceRole:
+  ### 
+  # Batch Job
+  ###
+  ComputeEnvironmentServiceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: 2012-10-17
+        Version: "2012-10-17"
         Statement:
           - Effect: 'Allow'
             Principal:
@@ -41,18 +45,18 @@ Resources:
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole'
   
-  JobSG:
+  ComputeEnvironmentSg:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: !Ref Vpc
-      GroupDescription: 'Security Group for Batch job'
+      GroupDescription: 'security group for batch compute environment'
 
   ComputeEnvironment:
     Type: AWS::Batch::ComputeEnvironment
     Properties:
       Type: MANAGED
       State: ENABLED
-      ServiceRole: !GetAtt ServiceRole.Arn
+      ServiceRole: !GetAtt ComputeEnvironmentServiceRole.Arn
       ComputeResources:
         Type: FARGATE
         MaxvCpus: 1
@@ -60,7 +64,7 @@ Resources:
         - !Ref Subnet1
         - !Ref Subnet2
         SecurityGroupIds:
-        - !Ref JobSG
+        - !Ref ComputeEnvironmentSg
   
   JobQueue:
     Type: AWS::Batch::JobQueue
@@ -71,11 +75,11 @@ Resources:
       Priority: 1
       State: ENABLED
 
-  ExecutionRole:
+  JobExecutionRole:
     Type: AWS::IAM::Role
     Properties:
      AssumeRolePolicyDocument:
-        Version: 2012-10-17
+        Version: "2012-10-17"
         Statement:
           - Effect: 'Allow'
             Principal:
@@ -85,11 +89,12 @@ Resources:
               - 'sts:AssumeRole'
      ManagedPolicyArns:
      - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
-  JobRole:
+
+  JobTaskRole:
     Type: 'AWS::IAM::Role'
     Properties:
       AssumeRolePolicyDocument:
-        Version: 2012-10-17
+        Version: "2012-10-17"
         Statement:
           - Effect: 'Allow'
             Principal:
@@ -100,14 +105,14 @@ Resources:
       Policies:
       - PolicyName: BucketAccess
         PolicyDocument:
-          Version: 2012-10-17
+          Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action: [ 's3:GetObject', 's3:PutObject' ]
               Resource:
               - !Join ['', ['arn:aws:s3:::', { Ref: BucketName }, '/*' ] ]
 
-  LogGroup:
+  JobLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Join [ '', [ '/', { Ref: 'AWS::StackName' }, '/log' ] ]
@@ -139,15 +144,61 @@ Resources:
           Value: 0.5
         - Type: MEMORY
           Value: 1024
-        JobRoleArn: !GetAtt JobRole.Arn
-        ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+        JobRoleArn: !GetAtt JobTaskRole.Arn
+        ExecutionRoleArn: !GetAtt JobExecutionRole.Arn
         LogConfiguration:
           LogDriver: awslogs
           Options:
-            "awslogs-group": !Ref LogGroup
+            "awslogs-group": !Ref JobLogGroup
             "awslogs-stream-prefix": "prefix"
 
-  RootBatchRole:
+  ###
+  # Lambda (additional target)
+  ###
+  HelloLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName:
+            Fn::Sub: ${AWS::StackName}-HelloLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:*:*:*"
+                
+
+  HelloLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: HelloLambdaFunction
+      Role: !GetAtt HelloLambdaRole.Arn
+      Runtime: python3.7
+      Handler: index.my_handler
+      Code:
+        ZipFile: |
+          def my_handler(event, context):
+            message = 'Hello Lambda World!'
+            print(event)
+            return message
+
+  ###
+  # Event Rule
+  ###
+  EventRuleTargetBatchRole:
     Type: 'AWS::IAM::Role'
     Properties:
       AssumeRolePolicyDocument:
@@ -169,7 +220,7 @@ Resources:
                 Action: '*'
                 Resource: '*'
 
-  MyEventRule:
+  EventRule:
     Type: 'AWS::Events::Rule'
     Properties:
       # Tags:
@@ -188,16 +239,25 @@ Resources:
           #   key:
           #   - suffix: ".mp4"
       Targets:
-        - Arn: 
-            Ref: JobQueue
-          Id: mybatchtarget
-          RoleArn: !GetAtt RootBatchRole.Arn
+        - Arn: !Ref JobQueue
+          Id: batchjobqueue
+          RoleArn: !GetAtt EventRuleTargetBatchRole.Arn
           BatchParameters:
             JobDefinition: 
               Ref: JobDefinition
-            JobName: myjob
+            JobName: job
           # Input:
           #   !Sub
           #     - '{"Parameters": {"param1": "--param.name1=${param1}", "param2": "--param.name2=${param2}"}}'
           #     - param1: {param1_value}
           #       param2: {param2_value}
+        - Arn: !GetAtt HelloLambdaFunction.Arn
+          Id: lambda
+
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt HelloLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRule.Arn
