@@ -125,8 +125,6 @@ Resources:
       JobDefinitionName: { Ref: "AWS::StackName" }
       PlatformCapabilities:
       - FARGATE
-      # Tags:
-      #   aws:dlm:event-type:batch-job: true
       Timeout:
         AttemptDurationSeconds: 60
       RetryStrategy:
@@ -207,24 +205,23 @@ Resources:
           - Effect: Allow
             Principal:
               Service:
-                - batch.amazonaws.com
+              - events.amazonaws.com
             Action:
               - 'sts:AssumeRole'
       Path: /
       Policies:
-        - PolicyName: root
+        - PolicyName: batch
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: '*'
+                Action:
+                - batch:SubmitJob
                 Resource: '*'
 
   EventRule:
     Type: 'AWS::Events::Rule'
     Properties:
-      # Tags:
-      #   aws:dlm:event-type:batch-job: true
       State: ENABLED
       EventPattern:
         source:
@@ -235,9 +232,9 @@ Resources:
           bucket:
             name:
             - !Ref MyBucket
-          # object:
-          #   key:
-          #   - suffix: ".mp4"
+          object:
+            key:
+            - wildcard: "dir/*.txt"
       Targets:
         - Arn: !Ref JobQueue
           Id: batchjobqueue
